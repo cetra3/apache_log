@@ -10,10 +10,16 @@ extern crate chrono;
 
 extern crate clap;
 
+extern crate num_cpus;
+
+
+
+
 mod builder;
 
+mod iter;
 
-use futures::{Future, Sink, Stream};
+use futures::Stream;
 use regex::Regex;
 use r2d2_postgres::{TlsMode, PostgresConnectionManager};
 use r2d2::Pool;
@@ -46,6 +52,11 @@ fn main() {
                     .short("f")
                     .takes_value(true)
                     .default_value("access_log"))
+            .arg(Arg::with_name("mode")
+                    .help("Mode: either (p)arallel for multi-threaded or (s)erial")
+                    .short("m")
+                    .takes_value(true)
+                    .default_value("p"))
             .get_matches();
 
     let db_conn = matches.value_of("db_conn").unwrap();
@@ -53,61 +64,65 @@ fn main() {
 
     let manager = PostgresConnectionManager::new(db_conn, TlsMode::None).unwrap();
 
+    let mode = matches.value_of("mode").unwrap();
+
     let config = r2d2::Config::default();
     let pgpool = r2d2::Pool::new(config, manager).unwrap();
 
-
     builder::build(&pgpool);
-
-    // generate a thread pool
-    let pool = futures_cpupool::Builder::new()
-        .name_prefix("pool-")
-        .create();
-
-    // produce input
-    let (tx, rx) = futures::sync::mpsc::channel(64);
-    let handle = std::thread::Builder::new()
-        .name("source".to_string())
-        .spawn(move || {
-            consumer(tx, file_name);
-        })
-        .unwrap();
 
 
     let re = Regex::new("^([0-9.]+)\\s([\\w-]+)\\s([\\w-]+)\\s\\[([^\\]]+)\\]\\s\"([^\"]+)\"\\s(\\d+)\\s([\\d-]+)\\s\"([^\"]+)\"\\s\"([^\"]+)\"").unwrap();
 
-    // process input
-    let rx = rx.map(|line| {
+    let file = File::open(&file_name).unwrap();
+    let reader = BufReader::new(file);
 
-        let re = re.clone();
-        let pgpool = pgpool.clone();
+    match mode {
+        "s" => {
+            println!("Processing '{}' in serial", file_name);
 
-        pool.spawn_fn(move || {
+            for line in reader.lines() {
+                let re = re.clone();
+                let pgpool = pgpool.clone();
+                producer(pgpool, re, &line.unwrap());
+            }
 
-            producer(pgpool, re, &line);
+        },
+        _ => {
+            println!("Processing '{}' in parallel", file_name);
 
-            Ok(())
-        })
-    })
-    .buffered(1024);
+            let cpu_count = num_cpus::get();
 
-    let number = rx.wait().count();
+            // generate a thread pool
+            let pool = futures_cpupool::Builder::new()
+                .name_prefix("pool-")
+                .pool_size(cpu_count)
+                .create();
 
-    handle.join().unwrap();
+            let stream = iter::iter(reader.lines());
 
-    println!("Number of entries:{}", number);
-}
+            // process input
+            let stream = stream.map(|line| {
 
-fn consumer(mut tx: futures::sync::mpsc::Sender<String>, file_name: String)  {
+                let re = re.clone();
+                let pgpool = pgpool.clone();
 
-    let f = File::open(&file_name).unwrap();
-    let f = BufReader::new(f);
+                pool.spawn_fn(move || {
 
-    for line in f.lines() {
-        tx = tx.send(line.unwrap()).wait().unwrap();
+                    producer(pgpool, re, &line);
+
+                    Ok(())
+                })
+            })
+            .buffer_unordered(cpu_count * 4);
+
+            let number = stream.wait().count();
+            println!("Number of entries:{}", number);
+        }
     }
 
 }
+
 
 fn producer(pool: Pool<PostgresConnectionManager>, re: Regex, line: &str) {
 

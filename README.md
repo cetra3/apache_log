@@ -20,6 +20,7 @@ FLAGS:
 OPTIONS:
     -c <db_conn>         Url for postgres connection [default: postgres://logs:logs@127.0.0.1]
     -f <filename>        Filename of the Access log [default: access_log]
+    -m <mode>            Mode: either (p)arallel for multi-threaded or (s)erial [default: p]
 ```
 
 You will need a postgres database and user.  The table is created automatically by `builder.rs` but requires that the URL for the db connection is in working order.  The default is localhost with a user `logs`, password `logs` and db `logs`.
@@ -40,15 +41,52 @@ find . -name "access_log*" -exec apache_log -f {} \;
 
 ## Benchmarks
 
-```
-10:38:23-cetra@Cetras-MBP:~/Desktop/apache_log$ time cargo run --release
-    Finished release [optimized] target(s) in 0.0 secs
-     Running `target/release/apache_log`
-Number of entries:285866
+Running the code in parallel is the fastest. on a Macbook Pro it roughly can do around 6000 lines per second
 
-real    0m49.615s
-user    3m14.670s
-sys     0m22.918s
-```
+Running in serial:
 
-`285866` / `49.615` = `5761.68` logs/s
+
+    time cargo run --release -- -m s
+        Finished release [optimized] target(s) in 0.0 secs
+         Running `target/release/apache_log -m s`
+    Processing 'access_log' in serial
+    
+    
+    real    2m59.259s
+    user    1m22.424s
+    sys     0m8.816s
+
+`~1597` per second.
+
+Running in parallel:
+
+
+    time cargo run --release -- -m p
+        Finished release [optimized] target(s) in 0.0 secs
+         Running `target/release/apache_log -m p`
+    Processing 'access_log' in parallel
+    Number of entries:285866
+    
+    real    0m44.470s
+    user    2m48.449s
+    sys     0m23.350s
+
+
+`~6496` per second.
+
+
+### Futures Overhead
+
+Running with the `producer` function commented out (i.e, just with the futures overhead, cloning a couple of things and buffering a file):
+
+
+    time cargo run --release -- -m p
+        Finished release [optimized] target(s) in 0.0 secs
+         Running `target/release/apache_log -m p`
+    Processing 'access_log' in parallel
+    Number of entries:285866
+    
+    real    0m0.900s
+    user    0m0.899s
+    sys     0m1.128s
+
