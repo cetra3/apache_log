@@ -1,6 +1,5 @@
 extern crate futures;
 extern crate futures_cpupool;
-extern crate regex;
 
 extern crate r2d2;
 extern crate r2d2_postgres;
@@ -12,6 +11,12 @@ extern crate clap;
 
 extern crate num_cpus;
 
+extern crate pom;
+
+
+use pom::DataInput;
+use pom::parser::*;
+
 
 
 
@@ -20,7 +25,6 @@ mod builder;
 mod iter;
 
 use futures::Stream;
-use regex::Regex;
 use r2d2_postgres::{TlsMode, PostgresConnectionManager};
 use r2d2::Pool;
 use postgres::types::ToSql;
@@ -36,10 +40,24 @@ use std::str::FromStr;
 use clap::{Arg, App};
 
 
+struct ApacheLog {
+    ip_address: String,
+    identd: String,
+    username: String,
+    time: NaiveDateTime,
+    request: String,
+    status_code: i64,
+    size: Option<i64>,
+    referrer: String,
+    user_agent: String
+}
+
+
+
 fn main() {
 
     let matches = App::new("Apache Logs")
-            .version("0.1.0")
+            .version("0.2.0")
             .author("Cetra Free")
             .about("Parses Apache logs, putting them in a database table")
             .arg(Arg::with_name("db_conn")
@@ -71,9 +89,6 @@ fn main() {
 
     builder::build(&pgpool);
 
-
-    let re = Regex::new("^([0-9.]+)\\s([\\w-]+)\\s([\\w-]+)\\s\\[([^\\]]+)\\]\\s\"([^\"]+)\"\\s(\\d+)\\s([\\d-]+)\\s\"([^\"]+)\"\\s\"([^\"]+)\"").unwrap();
-
     let file = File::open(&file_name).unwrap();
     let reader = BufReader::new(file);
 
@@ -82,9 +97,8 @@ fn main() {
             println!("Processing '{}' in serial", file_name);
 
             for line in reader.lines() {
-                let re = re.clone();
                 let pgpool = pgpool.clone();
-                producer(pgpool, re, &line.unwrap());
+                producer(pgpool, &line.unwrap());
             }
 
         },
@@ -104,12 +118,11 @@ fn main() {
             // process input
             let stream = stream.map(|line| {
 
-                let re = re.clone();
                 let pgpool = pgpool.clone();
 
                 pool.spawn_fn(move || {
 
-                    producer(pgpool, re, &line);
+                    producer(pgpool, &line);
 
                     Ok(())
                 })
@@ -124,68 +137,106 @@ fn main() {
 }
 
 
-fn producer(pool: Pool<PostgresConnectionManager>, re: Regex, line: &str) {
+fn producer(pool: Pool<PostgresConnectionManager>, line: &str) {
 
+    let parser = ipaddr() + untilspace() + untilspace() + space() * betweenbrackets() + space() * betweenquotes() + untilspace() + untilspace() + space() * betweenquotes() + space() * betweenquotes();
+    let mut input = DataInput::new(line.as_ref());
 
-    let caps = re.captures(&line).expect("Could not parse line");
+    let output = parser.parse(&mut input);
 
-    let ip_address = String::from(caps.get(1).unwrap().as_str());
-    let identd = String::from(caps.get(2).unwrap().as_str());
-    let username = String::from(caps.get(3).unwrap().as_str());
-    let time = String::from(caps.get(4).unwrap().as_str());
-    let request = String::from(caps.get(5).unwrap().as_str());
-    let status_code = i64::from_str(caps.get(6).unwrap().as_str()).unwrap();
-    let size = i64::from_str(caps.get(7).unwrap().as_str());
-    let referrer = String::from(caps.get(8).unwrap().as_str());
-    let user_agent = String::from(caps.get(9).unwrap().as_str());
+    if let Ok(((((((((ip_address, identd), username), time), request), status_code), raw_size), referrer), user_agent)) = output {
 
-    let datetime = NaiveDateTime::parse_from_str(&time, "%d/%b/%Y:%H:%M:%S %z").unwrap();
+        let size = match i64::from_str(&raw_size) {
+            Ok(parse_size) => Some(parse_size),
+            _ => None
+        };
 
-    let mut params: Vec<&ToSql> = Vec::new();
-    let mut columns: Vec<&str> = Vec::new();
+        let log = ApacheLog {
+            ip_address: ip_address,
+            identd: identd,
+            username: username,
+            time: NaiveDateTime::parse_from_str(&time, "%d/%b/%Y:%H:%M:%S %z").unwrap(),
+            request: request,
+            status_code: i64::from_str(&status_code).unwrap(),
+            size: size,
+            referrer: referrer,
+            user_agent: user_agent,
+        };
 
-    columns.push("ip_address");
-    params.push(&ip_address);
+        let mut params: Vec<&ToSql> = Vec::new();
+        let mut columns: Vec<&str> = Vec::new();
 
-    columns.push("identd");
-    params.push(&identd);
+        columns.push("ip_address");
+        params.push(&log.ip_address);
 
-    columns.push("username");
-    params.push(&username);
+        columns.push("identd");
+        params.push(&log.identd);
 
-    columns.push("time");
-    params.push(&datetime);
+        columns.push("username");
+        params.push(&log.username);
 
-    columns.push("request");
-    params.push(&request);
+        columns.push("time");
+        params.push(&log.time);
 
-    columns.push("status_code");
-    params.push(&status_code);
+        columns.push("request");
+        params.push(&log.request);
 
-    if let Ok(ref parsed_size) = size {
-        columns.push("size");
-        params.push(parsed_size);
-    }
+        columns.push("status_code");
+        params.push(&log.status_code);
 
-    columns.push("referrer");
-    params.push(&referrer);
+        if let Some(ref parsed_size) = log.size {
+            columns.push("size");
+            params.push(parsed_size);
+        }
 
-    columns.push("user_agent");
-    params.push(&user_agent);
+        columns.push("referrer");
+        params.push(&log.referrer);
 
-    let mut query = String::new();
-    query.push_str("INSERT INTO logs(");
+        columns.push("user_agent");
+        params.push(&log.user_agent);
 
-    query.push_str(&columns.join(", "));
+        let mut query = String::new();
+        query.push_str("INSERT INTO logs(");
 
-    query.push_str(") values (");
-    query.push_str(&(1..params.len() + 1).map(|num| format!("${}", num)).collect::<Vec<String>>().join(","));
-    query.push_str(")");
+        query.push_str(&columns.join(", "));
 
-    if let Ok(conn) = pool.get() {
-        conn.execute(&query, &params).unwrap();
+        query.push_str(") values (");
+        query.push_str(&(1..params.len() + 1).map(|num| format!("${}", num)).collect::<Vec<String>>().join(","));
+        query.push_str(")");
+
+        if let Ok(conn) = pool.get() {
+            conn.execute(&query, &params).unwrap();
+        }
     }
 }
 
 
+fn ipaddr<'a>() -> Parser<'a, u8, String> {
+    one_of(b"1234567890.").repeat(0..).collect().convert(String::from_utf8)
+}
+
+fn space<'a>() -> Parser<'a, u8, ()> {
+    one_of(b" \t\r\n").repeat(0..).discard()
+}
+
+fn untilspace<'a>() -> Parser<'a, u8, String> {
+
+    let value = space() * none_of(b" ").repeat(0..);
+
+    value.convert(String::from_utf8)
+}
+
+fn betweenbrackets<'a>() -> Parser<'a, u8, String> {
+
+    let value = sym(b'[') * none_of(b"]").repeat(0..) - sym(b']').discard();
+
+    value.convert(String::from_utf8)
+}
+
+
+fn betweenquotes<'a>() -> Parser<'a, u8, String> {
+    let value = sym(b'"') * none_of(b"\"").repeat(0..) - sym(b'"').discard();
+
+    value.convert(String::from_utf8)
+}
 

@@ -1,15 +1,15 @@
 [package]
 name = "apache_log"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["cetra3 <peter@parashift.com.au>"]
 
 [dependencies]
 futures = "0.1"
 futures-cpupool = "0.1"
-regex = "0.2"
 postgres = { version = "*", features = ['with-chrono'] }
 r2d2 = "*"
 r2d2_postgres = "*"
 chrono = "*"
 clap = "*"
 num_cpus = "1.2.1"
+pom = "1.0.1"

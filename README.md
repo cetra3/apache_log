@@ -36,7 +36,6 @@ find . -name "access_log*" -exec apache_log -f {} \;
 
 ## Todo
 
-* Make the parsing of the log file more efficient. At the moment release on a Macbook Pro, it can ingest about 5000 records per second.  Maybe move away from regex?
 * Provide a configurable log file format which allows this to be used with other log formats.
 
 ## Benchmarks
@@ -45,48 +44,64 @@ Running the code in parallel is the fastest. on a Macbook Pro it roughly can do 
 
 Running in serial:
 
-
-    time cargo run --release -- -m s
+    time cargo run --release -- -m s -f access_log
         Finished release [optimized] target(s) in 0.0 secs
-         Running `target/release/apache_log -m s`
+         Running `target/release/apache_log -m s -f access_log`
     Processing 'access_log' in serial
     
-    
-    real    2m59.259s
-    user    1m22.424s
-    sys     0m8.816s
+    real    3m38.919s
+    user    0m18.345s
+    sys     0m18.932s
 
-`~1597` per second.
+`~3176` per second.
 
 Running in parallel:
 
 
-    time cargo run --release -- -m p
-        Finished release [optimized] target(s) in 0.0 secs
-         Running `target/release/apache_log -m p`
+    time cargo run --release -- -f access_log
+       Compiling apache_log v0.1.0 (file:///Users/cetra/Desktop/apache_log)
+        Finished release [optimized] target(s) in 5.0 secs
+         Running `target/release/apache_log -f access_log`
     Processing 'access_log' in parallel
-    Number of entries:285866
+    Number of entries:692434
     
-    real    0m44.470s
-    user    2m48.449s
-    sys     0m23.350s
+    real    1m0.867s
+    user    0m41.617s
+    sys     0m41.057s
 
 
-`~6496` per second.
+`~11351` per second.
 
+### Postgres Overhead
+
+Postgres submission has the majority of overhead.  Running without submission to postgres we can get 130k entries per second:
+
+    time cargo run --release --  -f access_log
+        Finished release [optimized] target(s) in 0.0 secs
+         Running `target/release/apache_log -f access_log`
+    Processing 'access_log' in parallel
+    Number of entries:692434
+    
+    real    0m4.948s
+    user    0m13.767s
+    sys     0m5.058s
+
+`~138486` per second
 
 ### Futures Overhead
 
 Running with the `producer` function commented out (i.e, just with the futures overhead, cloning a couple of things and buffering a file):
 
 
-    time cargo run --release -- -m p
+    time cargo run --release --  -f access_log
         Finished release [optimized] target(s) in 0.0 secs
-         Running `target/release/apache_log -m p`
+         Running `target/release/apache_log -f access_log`
     Processing 'access_log' in parallel
-    Number of entries:285866
+    Number of entries:692434
     
-    real    0m0.900s
-    user    0m0.899s
-    sys     0m1.128s
+    real    0m1.954s
+    user    0m2.182s
+    sys     0m3.228s
 
+
+`~346217` per second
