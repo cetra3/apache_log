@@ -18,6 +18,7 @@ use pom::DataInput;
 use pom::parser::*;
 
 
+static ZERO: i64 = 0;
 
 
 mod builder;
@@ -32,7 +33,7 @@ use postgres::types::ToSql;
 use chrono::NaiveDateTime;
 
 
-use std::io::BufReader;
+use std::io::{Error, ErrorKind, BufReader};
 use std::io::prelude::*;
 use std::fs::File;
 use std::str::FromStr;
@@ -98,7 +99,12 @@ fn main() {
 
             for line in reader.lines() {
                 let pgpool = pgpool.clone();
-                producer(pgpool, &line.unwrap());
+                let log = producer(&line.unwrap()).unwrap();
+
+                let logs = vec!(log);
+
+                submitter(pgpool, logs).unwrap();
+
             }
 
         },
@@ -118,26 +124,101 @@ fn main() {
             // process input
             let stream = stream.map(|line| {
 
-                let pgpool = pgpool.clone();
-
                 pool.spawn_fn(move || {
 
-                    producer(pgpool, &line);
+                    producer(&line)
+                })
 
-                    Ok(())
+
+
+            })
+            .buffer_unordered(cpu_count * 100)
+            .chunks(10000)
+            .map(|chunk| {
+
+                let pgpool = pgpool.clone();
+
+
+                pool.spawn_fn(move || {
+                    submitter(pgpool, chunk)
                 })
             })
             .buffer_unordered(cpu_count * 4);
 
+
             let number = stream.wait().count();
-            println!("Number of entries:{}", number);
+            println!("Number of batches:{}", number);
         }
     }
 
 }
 
+fn submitter(pool: Pool<PostgresConnectionManager>, logs: Vec<ApacheLog>) -> Result<(), Error> {
 
-fn producer(pool: Pool<PostgresConnectionManager>, line: &str) {
+
+    let mut columns: Vec<&str> = Vec::new();
+
+    columns.push("ip_address");
+    columns.push("identd");
+    columns.push("username");
+    columns.push("time");
+    columns.push("request");
+    columns.push("status_code");
+    columns.push("size");
+    columns.push("referrer");
+    columns.push("user_agent");
+
+    let mut query = String::new();
+    query.push_str("INSERT INTO logs(");
+
+    query.push_str(&columns.join(", "));
+
+    query.push_str(") values (");
+    query.push_str(&(1..columns.len() + 1).map(|num| format!("${}", num)).collect::<Vec<String>>().join(","));
+    query.push_str(")");
+
+    if let Ok(conn) = pool.get() {
+        let trans = conn.transaction().unwrap();
+
+        let stmt = trans.prepare(&query).unwrap();
+
+        for log in logs {
+            let mut params: Vec<&ToSql> = Vec::new();
+
+            params.push(&log.ip_address);
+            params.push(&log.identd);
+            params.push(&log.username);
+            params.push(&log.time);
+            params.push(&log.request);
+            params.push(&log.status_code);
+
+            if let Some(ref parsed_size) = log.size {
+                params.push(parsed_size);
+            } else {
+                params.push(&ZERO);
+            }
+
+
+            params.push(&log.referrer);
+
+
+            params.push(&log.user_agent);
+
+
+            stmt.execute(&params).unwrap();
+
+        }
+
+        trans.commit().unwrap();
+
+        ()
+
+    }
+    Err(Error::from(ErrorKind::InvalidData))
+
+}
+
+fn producer(line: &str) -> Result<ApacheLog, Error> {
 
     let parser = ipaddr() + untilspace() + untilspace() + space() * betweenbrackets() + space() * betweenquotes() + untilspace() + untilspace() + space() * betweenquotes() + space() * betweenquotes();
     let mut input = DataInput::new(line.as_ref());
@@ -151,7 +232,7 @@ fn producer(pool: Pool<PostgresConnectionManager>, line: &str) {
             _ => None
         };
 
-        let log = ApacheLog {
+        return Ok(ApacheLog {
             ip_address: ip_address,
             identd: identd,
             username: username,
@@ -161,53 +242,10 @@ fn producer(pool: Pool<PostgresConnectionManager>, line: &str) {
             size: size,
             referrer: referrer,
             user_agent: user_agent,
-        };
+        });
+   }
 
-        let mut params: Vec<&ToSql> = Vec::new();
-        let mut columns: Vec<&str> = Vec::new();
-
-        columns.push("ip_address");
-        params.push(&log.ip_address);
-
-        columns.push("identd");
-        params.push(&log.identd);
-
-        columns.push("username");
-        params.push(&log.username);
-
-        columns.push("time");
-        params.push(&log.time);
-
-        columns.push("request");
-        params.push(&log.request);
-
-        columns.push("status_code");
-        params.push(&log.status_code);
-
-        if let Some(ref parsed_size) = log.size {
-            columns.push("size");
-            params.push(parsed_size);
-        }
-
-        columns.push("referrer");
-        params.push(&log.referrer);
-
-        columns.push("user_agent");
-        params.push(&log.user_agent);
-
-        let mut query = String::new();
-        query.push_str("INSERT INTO logs(");
-
-        query.push_str(&columns.join(", "));
-
-        query.push_str(") values (");
-        query.push_str(&(1..params.len() + 1).map(|num| format!("${}", num)).collect::<Vec<String>>().join(","));
-        query.push_str(")");
-
-        if let Ok(conn) = pool.get() {
-            conn.execute(&query, &params).unwrap();
-        }
-    }
+    Err(Error::from(ErrorKind::InvalidData))
 }
 
 
