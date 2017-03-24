@@ -20,6 +20,7 @@ use pom::parser::*;
 
 static ZERO: i64 = 0;
 
+static CHUNK_SIZE: usize = 10000;
 
 mod builder;
 
@@ -38,6 +39,9 @@ use std::io::{Error, ErrorKind, BufReader};
 use std::io::prelude::*;
 use std::fs::File;
 use std::str::FromStr;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 
 use clap::{Arg, App};
 
@@ -98,21 +102,45 @@ fn main() {
         "s" => {
             println!("Processing '{}' in serial", file_name);
 
+            let mut logs = vec!();
+
+            let mut num_lines = 0;
+            let mut num_batches = 0;
+
             for line in reader.lines() {
-                let pgpool = pgpool.clone();
-                let log = producer(&line.unwrap()).unwrap();
 
-                let logs = vec!(log);
+                if let Ok(log) = producer(&(line.unwrap())) {
+                    logs.push(log);
+                }
 
-                submitter(pgpool, logs).unwrap();
+                if logs.len() > CHUNK_SIZE {
 
+                    num_lines += logs.len();
+
+                    submitter(pgpool.clone(), logs).expect("Could not submit to Postgres in main loop");
+
+                    num_batches += 1;
+                    logs = vec!();
+                }
             }
+
+            //Any leftovers
+            if logs.len() > 0 {
+
+                num_lines += logs.len();
+                num_batches += 1;
+                submitter(pgpool.clone(), logs).expect("Could not submit to Postgres in end loop");
+            }
+
+            println!("Number of lines: {}, number of submission batches: {}", num_lines, num_batches);
 
         },
         _ => {
             println!("Processing '{}' in parallel", file_name);
 
             let cpu_count = num_cpus::get();
+
+            let num_lines = AtomicUsize::new(0);
 
             // generate a thread pool
             let pool = futures_cpupool::Builder::new()
@@ -131,9 +159,11 @@ fn main() {
                 })
 
             })
-            .buffer_unordered(cpu_count * 100)
-            .chunks(10000)
+            .buffer_unordered(cpu_count)
+            .chunks(CHUNK_SIZE)
             .map(|chunk| {
+
+                num_lines.fetch_add(chunk.len(), Ordering::Relaxed);
 
                 let pgpool = pgpool.clone();
 
@@ -153,9 +183,9 @@ fn main() {
 
             let submission = stream::futures_unordered(parse_stream);
 
-            let number = submission.wait().count();
+            let num_batches = submission.wait().count();
 
-            println!("Number of batches:{}", number);
+            println!("Number of lines: {}, number of submission batches: {}", num_lines.load(Ordering::Relaxed), num_batches);
         }
     }
 
@@ -185,43 +215,48 @@ fn submitter(pool: Pool<PostgresConnectionManager>, logs: Vec<ApacheLog>) -> Res
     query.push_str(&(1..columns.len() + 1).map(|num| format!("${}", num)).collect::<Vec<String>>().join(","));
     query.push_str(")");
 
-    if let Ok(conn) = pool.get() {
-        let trans = conn.transaction().unwrap();
+    match pool.get() {
+        Ok(conn) => {
+            let trans = conn.transaction()?;
 
-        let stmt = trans.prepare(&query).unwrap();
+            let stmt = trans.prepare(&query)?;
 
-        for log in logs {
-            let mut params: Vec<&ToSql> = Vec::new();
+            for log in logs {
+                let mut params: Vec<&ToSql> = Vec::new();
 
-            params.push(&log.ip_address);
-            params.push(&log.identd);
-            params.push(&log.username);
-            params.push(&log.time);
-            params.push(&log.request);
-            params.push(&log.status_code);
+                params.push(&log.ip_address);
+                params.push(&log.identd);
+                params.push(&log.username);
+                params.push(&log.time);
+                params.push(&log.request);
+                params.push(&log.status_code);
 
-            if let Some(ref parsed_size) = log.size {
-                params.push(parsed_size);
-            } else {
-                params.push(&ZERO);
+                if let Some(ref parsed_size) = log.size {
+                    params.push(parsed_size);
+                } else {
+                    params.push(&ZERO);
+                }
+
+
+                params.push(&log.referrer);
+
+
+                params.push(&log.user_agent);
+
+
+                stmt.execute(&params)?;
+
             }
 
+            trans.commit()?;
 
-            params.push(&log.referrer);
-
-
-            params.push(&log.user_agent);
-
-
-            stmt.execute(&params).unwrap();
-
+            return Ok(())
+        },
+        Err(e) => {
+            println!("Error:{}", e);
         }
-
-        trans.commit().unwrap();
-
-        ()
-
     }
+
     Err(Error::from(ErrorKind::InvalidData))
 
 }
