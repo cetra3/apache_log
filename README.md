@@ -44,64 +44,25 @@ Running the code in parallel is the fastest. on a Macbook Pro it roughly can do 
 
 Running in serial:
 
-    time cargo run --release -- -m s -f access_log
-        Finished release [optimized] target(s) in 0.0 secs
-         Running `target/release/apache_log -m s -f access_log`
-    Processing 'access_log' in serial
-    
-    real    3m38.919s
-    user    0m18.345s
-    sys     0m18.932s
+```
+cargo run --release -- -m s
+   Compiling apache_log v0.2.0 (file:///Users/cetra/Desktop/apache_log)
+    Finished release [optimized] target(s) in 6.71 secs
+     Running `target/release/apache_log -m s`
+Processing 'access_log' in serial
+Number of lines: 692434, number of batches: 70, total time: 48s, lines per second: 14425
+```
 
-`~3176` per second.
+~14k per second
 
 Running in parallel:
 
+```
+cargo run --release
+    Finished release [optimized] target(s) in 0.0 secs
+     Running `target/release/apache_log`
+Processing 'access_log' in parallel
+Number of lines: 692434, number of batches: 70, total time: 18s, lines per second: 38468
+```
 
-    time cargo run --release -- -f access_log
-       Compiling apache_log v0.1.0 (file:///Users/cetra/Desktop/apache_log)
-        Finished release [optimized] target(s) in 5.0 secs
-         Running `target/release/apache_log -f access_log`
-    Processing 'access_log' in parallel
-    Number of entries:692434
-    
-    real    1m0.867s
-    user    0m41.617s
-    sys     0m41.057s
-
-
-`~11351` per second.
-
-### Postgres Overhead
-
-Postgres submission has the majority of overhead.  Running without submission to postgres we can get 130k entries per second:
-
-    time cargo run --release --  -f access_log
-        Finished release [optimized] target(s) in 0.0 secs
-         Running `target/release/apache_log -f access_log`
-    Processing 'access_log' in parallel
-    Number of entries:692434
-    
-    real    0m4.948s
-    user    0m13.767s
-    sys     0m5.058s
-
-`~138486` per second
-
-### Futures Overhead
-
-Running with the `producer` function commented out (i.e, just with the futures overhead, cloning a couple of things and buffering a file):
-
-
-    time cargo run --release --  -f access_log
-        Finished release [optimized] target(s) in 0.0 secs
-         Running `target/release/apache_log -f access_log`
-    Processing 'access_log' in parallel
-    Number of entries:692434
-    
-    real    0m1.954s
-    user    0m2.182s
-    sys     0m3.228s
-
-
-`~346217` per second
+~38k per second

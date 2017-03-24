@@ -12,6 +12,8 @@ extern crate clap;
 extern crate num_cpus;
 
 extern crate pom;
+extern crate time;
+
 
 
 use pom::DataInput;
@@ -45,6 +47,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::{Arg, App};
 
+use time::PreciseTime;
+
 
 struct ApacheLog {
     ip_address: String,
@@ -61,6 +65,8 @@ struct ApacheLog {
 
 
 fn main() {
+
+    let start = PreciseTime::now();
 
     let matches = App::new("Apache Logs")
             .version("0.2.0")
@@ -132,7 +138,11 @@ fn main() {
                 submitter(pgpool.clone(), logs).expect("Could not submit to Postgres in end loop");
             }
 
-            println!("Number of lines: {}, number of submission batches: {}", num_lines, num_batches);
+            let end = PreciseTime::now();
+
+            let time_per_line  = num_lines as i64 / start.to(end).num_seconds();
+
+            println!("Number of lines: {}, number of batches: {}, total time: {}s, lines per second: {}", num_lines, num_batches, start.to(end).num_seconds(), time_per_line);
 
         },
         _ => {
@@ -185,14 +195,17 @@ fn main() {
 
             let num_batches = submission.wait().count();
 
-            println!("Number of lines: {}, number of submission batches: {}", num_lines.load(Ordering::Relaxed), num_batches);
+            let end = PreciseTime::now();
+
+            let time_per_line  = num_lines.load(Ordering::Relaxed) as i64 / start.to(end).num_seconds();
+
+            println!("Number of lines: {}, number of batches: {}, total time: {}s, lines per second: {}", num_lines.load(Ordering::Relaxed), num_batches, start.to(end).num_seconds(), time_per_line);
         }
     }
 
 }
 
 fn submitter(pool: Pool<PostgresConnectionManager>, logs: Vec<ApacheLog>) -> Result<(), Error> {
-
 
     let mut columns: Vec<&str> = Vec::new();
 
